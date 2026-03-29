@@ -22,7 +22,21 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install build twine
 
+      - name: Debug workspace
+        run: |
+          echo "PWD: $(pwd)"
+          echo "Listing repository root"
+          ls -la
+          echo "Find pyproject.toml and setup.py"
+          find . -maxdepth 4 -type f -name 'pyproject.toml' -print || true
+          find . -maxdepth 4 -type f -name 'setup.py' -print || true
+          echo "Tree (depth 2)"
+          find . -maxdepth 2 -print | sed -n '1,200p'
+          python -V
+          pip --version
+
       - name: Build artifacts
+        working-directory: geomtiles
         run: python -m build
 
       - name: Publish to TestPyPI
