@@ -40,6 +40,7 @@ jobs:
         run: python -m build
 
       - name: Publish to TestPyPI
+        working-directory: geomtiles
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
