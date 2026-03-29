@@ -1,0 +1,48 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+
+      - name: Debug workspace
+        run: |
+          echo "PWD: $(pwd)"
+          echo "Listing repository root"
+          ls -la
+          echo "Find pyproject.toml and setup.py"
+          find . -maxdepth 4 -type f -name 'pyproject.toml' -print || true
+          find . -maxdepth 4 -type f -name 'setup.py' -print || true
+          echo "Tree (depth 2)"
+          find . -maxdepth 2 -print | sed -n '1,200p'
+          python -V
+          pip --version
+
+      - name: Build artifacts
+        working-directory: geomtiles
+        run: python -m build
+
+      - name: Publish to PyPI
+        working-directory: geomtiles
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m twine upload --repository pypi dist/*
