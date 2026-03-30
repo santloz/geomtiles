@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
+from ..utils.metrics import metrics
 
 from ..domain.exceptions import (
     GeoTilesError,
@@ -134,6 +135,44 @@ def create_tile_router(tile_service: "TileService") -> APIRouter:
             content=tile_bytes,
             media_type=_MVT_CONTENT_TYPE,
         )
+
+    return router
+
+
+def create_metrics_router() -> APIRouter:
+    """Crea un router que expone métricas en formato Prometheus simple.
+
+    Devuelve métricas basadas en `geo_tiles.utils.metrics.metrics.snapshot()`.
+    """
+    router = APIRouter(tags=["metrics"])
+
+    @router.get("/metrics", response_class=Response, summary="Prometheus metrics")
+    async def metrics_endpoint() -> Response:
+        snap = metrics.snapshot()
+        lines = []
+
+        # Counters
+        lines.append('# HELP geo_tiles_counter_total GeoTiles counters')
+        lines.append('# TYPE geo_tiles_counter_total counter')
+        for k, v in snap.get("counters", {}).items():
+            safe_k = str(k).replace('"', '\\"')
+            lines.append(f'geo_tiles_counter_total{{name="{safe_k}"}} {int(v)}')
+
+        # Timers: count, total_ms, avg_ms
+        lines.append('# HELP geo_tiles_timer_count Count of timer events')
+        lines.append('# TYPE geo_tiles_timer_count counter')
+        lines.append('# HELP geo_tiles_timer_total_ms Total time in ms for timer')
+        lines.append('# TYPE geo_tiles_timer_total_ms gauge')
+        lines.append('# HELP geo_tiles_timer_avg_ms Average time in ms for timer')
+        lines.append('# TYPE geo_tiles_timer_avg_ms gauge')
+        for k, v in snap.get("timers", {}).items():
+            safe_k = str(k).replace('"', '\\"')
+            lines.append(f'geo_tiles_timer_count{{name="{safe_k}"}} {int(v.get("count", 0))}')
+            lines.append(f'geo_tiles_timer_total_ms{{name="{safe_k}"}} {float(v.get("total_ms", 0.0))}')
+            lines.append(f'geo_tiles_timer_avg_ms{{name="{safe_k}"}} {float(v.get("avg_ms", 0.0))}')
+
+        body = "\n".join(lines) + "\n"
+        return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
     return router
 

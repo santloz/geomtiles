@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple
 
 from ..repositories.metadata import MetadataRepository
 from ..utils.cache import TTLCache
+from ..utils.metrics import metrics
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -77,6 +78,13 @@ class MetadataService:
         _safe_id(table)
         return await self._repo.find_geom_col(schema, table)
 
+    async def has_column(self, schema: str, table: str, column: str) -> bool:
+        """Comprueba si una columna existe en la tabla (proxy al repositorio)."""
+        _safe_id(schema)
+        _safe_id(table)
+        _safe_id(column)
+        return await self._repo.has_column(schema, table, column)
+
     async def describe_layer(
         self,
         schema: str,
@@ -102,7 +110,8 @@ class MetadataService:
         _safe_id(schema)
         _safe_id(table)
         _safe_id(geom_column)
-
+        metrics.increment("metadata.describe_layer")
+        
         resolved_table = (
             await self.resolve_table_with_fallback(schema, table)
             if resolve_base_table
@@ -154,6 +163,7 @@ class MetadataService:
             return cached
 
         excluded = {geom_column, "geom", *(exclude_extra or [])}
+        metrics.increment("metadata.get_columns")
         cols = await self._repo.get_columns(
             schema, table, exclude_columns=list(excluded)
         )

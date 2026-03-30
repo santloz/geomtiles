@@ -18,7 +18,7 @@ from ..domain.exceptions import InvalidTileCoordinateError
 from ..domain.models import LayerConfig, PolygonTileRequest, TileRequest
 from ..repositories.tiles import TileRepository
 from ..services.metadata import MetadataService
-from ..sql.mvt import mvt_sql_for_layer
+from ..sql.registry import get_generator, default_generator_name
 from ..utils.geometry import is_valid_wkt
 from ..utils.tiles import grid_size_for_zoom, tile_xyz_to_bbox
 
@@ -87,6 +87,7 @@ class TileService:
         layer_configs: Optional[Dict[str, LayerConfig]] = None,
         max_concurrent_layers: int = _DEFAULT_MAX_CONCURRENT,
         tile_cache=None,
+        sql_generator: Optional[object] = None,
     ):
         """
         Args:
@@ -99,8 +100,15 @@ class TileService:
         self._repo = TileRepository(session_factory)
         self._metadata = MetadataService(session_factory)
         self._layers: Dict[str, LayerConfig] = layer_configs or {}
+        # Also index layers by canonical key schema.table.geom_col for quick lookup
+        self._layers_by_key: Dict[str, LayerConfig] = {
+            f"{c.schema}.{c.table}.{c.geom_column}": c
+            for c in (layer_configs or {}).values()
+        }
         self._semaphore = asyncio.Semaphore(max_concurrent_layers)
         self._tile_cache = tile_cache
+        # sql_generator may be a callable or a string ('cow') to choose mvt_cow
+        self._sql_generator = sql_generator
 
     @classmethod
     def from_dsn(cls, dsn: str, **kwargs) -> "TileService":
@@ -112,6 +120,11 @@ class TileService:
     def register_layer(self, config: LayerConfig) -> None:
         """Registra una capa con su configuración para uso posterior."""
         self._layers[config.name] = config
+        try:
+            key = f"{config.schema}.{config.table}.{config.geom_column}"
+            self._layers_by_key[key] = config
+        except Exception:
+            pass
 
     async def get_raw_columns(
         self, schema: str, table: str, exclude_columns: Optional[List[str]] = None
@@ -185,6 +198,10 @@ class TileService:
         z: int,
         priority: int,
         force_zero: bool,
+        minx: float | None = None,
+        miny: float | None = None,
+        maxx: float | None = None,
+        maxy: float | None = None,
     ) -> bytes:
         """Obtiene los bytes del tile para una sola capa, respetando el semáforo."""
         async with self.layer_slot():
@@ -195,18 +212,86 @@ class TileService:
                 geom_col,
                 exclude_extra=[geom_col],
             )
-            sql = mvt_sql_for_layer(
-                schema=schema,
-                table=layer_meta.resolved_table,
-                geom_col=geom_col,
-                envelope_sql=envelope_sql,
-                z=z,
-                grid_size=grid_size_for_zoom(z),
-                columns_str=cols_str,
-                clustered_columns_str=clustered_cols_str,
-                priority=priority,
-                force_zero=force_zero,
-            )
+            # Decide which SQL generator to use: per-layer config overrides global
+            key = f"{schema}.{layer_meta.resolved_table}.{geom_col}"
+            layer_conf = self._layers_by_key.get(key)
+
+            # Resolve generator name from layer config or global preference
+            gen_callable = None
+            # Per-layer explicit sql_mode (preferred)
+            if layer_conf and getattr(layer_conf, "sql_mode", None):
+                try:
+                    gen_callable = get_generator(layer_conf.sql_mode)
+                except KeyError:
+                    gen_callable = get_generator(default_generator_name())
+            elif layer_conf and getattr(layer_conf, "use_cow", False):
+                try:
+                    gen_callable = get_generator("cow")
+                except KeyError:
+                    gen_callable = get_generator(default_generator_name())
+            elif callable(self._sql_generator):
+                gen_callable = self._sql_generator
+            elif isinstance(self._sql_generator, str):
+                try:
+                    gen_callable = get_generator(self._sql_generator)
+                except KeyError:
+                    gen_callable = get_generator(default_generator_name())
+            else:
+                gen_callable = get_generator(default_generator_name())
+
+            # Call the selected generator. If it expects envelope_sql instead of bbox,
+            # fall back to the legacy signature by detecting argument names.
+            try:
+                # If generator accepts bbox-style args, prefer those when available
+                if gen_callable.__name__.lower().endswith("cow") and None not in (minx, miny, maxx, maxy):
+                    # generator likely expects bbox numeric args
+                    sql = gen_callable(
+                        schema=layer_meta.resolved_table.split('.')[0] if '.' in layer_meta.resolved_table else schema,
+                        table=layer_meta.resolved_table.split('.', 1)[-1] if '.' in layer_meta.resolved_table else layer_meta.resolved_table,
+                        geom_col=geom_col,
+                        minx=minx,
+                        miny=miny,
+                        maxx=maxx,
+                        maxy=maxy,
+                        z=z,
+                        grid_size=grid_size_for_zoom(z),
+                        columns_str=cols_str,
+                        clustered_columns_str=clustered_cols_str,
+                        priority=priority,
+                        force_zero=force_zero,
+                        project_ids=None,
+                        exclude_project_ids=None,
+                        id_gis=None,
+                        has_is_deleted=layer_meta.has_is_deleted,
+                    )
+                else:
+                    # Legacy generator signature: envelope_sql
+                    sql = gen_callable(
+                        schema=schema,
+                        table=layer_meta.resolved_table,
+                        geom_col=geom_col,
+                        envelope_sql=envelope_sql,
+                        z=z,
+                        grid_size=grid_size_for_zoom(z),
+                        columns_str=cols_str,
+                        clustered_columns_str=clustered_cols_str,
+                        priority=priority,
+                        force_zero=force_zero,
+                    )
+            except TypeError:
+                # Fallback: try calling with legacy signature
+                sql = gen_callable(
+                    schema=schema,
+                    table=layer_meta.resolved_table,
+                    geom_col=geom_col,
+                    envelope_sql=envelope_sql,
+                    z=z,
+                    grid_size=grid_size_for_zoom(z),
+                    columns_str=cols_str,
+                    clustered_columns_str=clustered_cols_str,
+                    priority=priority,
+                    force_zero=force_zero,
+                )
             return await self.execute_tile_sql(sql)
 
     async def _get_layer_tile_cached(
@@ -220,6 +305,10 @@ class TileService:
         y: int,
         priority: int,
         force_zero: bool,
+        minx: float | None = None,
+        miny: float | None = None,
+        maxx: float | None = None,
+        maxy: float | None = None,
     ) -> bytes:
         """Obtiene una capa desde caché o la genera y la guarda por separado."""
         if self._tile_cache is not None:
@@ -238,6 +327,10 @@ class TileService:
             z=z,
             priority=priority,
             force_zero=force_zero,
+            minx=minx,
+            miny=miny,
+            maxx=maxx,
+            maxy=maxy,
         )
 
         if self._tile_cache is not None and tile:
@@ -295,6 +388,10 @@ class TileService:
                 y=req.y,
                 priority=idx + 1,
                 force_zero=req.force_point_count_zero,
+                minx=minx,
+                miny=miny,
+                maxx=maxx,
+                maxy=maxy,
             )
             for idx, (schema, table, geom_col) in enumerate(parsed_layers)
         ]

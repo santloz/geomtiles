@@ -6,6 +6,7 @@ Domain models used by geo_tiles.
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from typing import Literal
 
 
 @dataclass
@@ -27,6 +28,8 @@ class LayerConfig:
     extent: int = 4096
     buffer: int = 64
     srid: int = 3857
+    use_cow: bool = False
+    sql_mode: Literal['default', 'cow'] = 'default'
 
 
 @dataclass

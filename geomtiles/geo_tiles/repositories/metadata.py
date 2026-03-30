@@ -186,3 +186,19 @@ class MetadataRepository:
             )
             row = result.fetchone()
             return row[0] if row else None
+
+    async def has_column(self, schema: str, table: str, column: str) -> bool:
+        """Return True if the given column exists in the table/view."""
+        _safe_id(schema)
+        _safe_id(table)
+        _safe_id(column)
+        sql = text(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = :schema AND table_name = :table AND column_name = :column
+            LIMIT 1
+        """
+        )
+        async with self._session_factory() as session:
+            result = await session.execute(sql, {"schema": schema, "table": table, "column": column})
+            return result.scalar() is not None
